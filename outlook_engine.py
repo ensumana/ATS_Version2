@@ -50,10 +50,12 @@ def clean_filename(name):
     return re.sub(r'[<>:"/\\|?*]', '_', str(name))
 
 
-def download_resumes(folder_path,
-                     from_date,
-                     to_date,
-                     progress_callback=None):
+def download_resumes(
+        folder_path,
+        from_date,
+        to_date,
+        progress_callback,
+        mailbox_name=None):
 
     processed = 0
     downloaded = 0
@@ -66,7 +68,11 @@ def download_resumes(folder_path,
             "Outlook.Application"
         ).GetNamespace("MAPI")
 
-        inbox = outlook.GetDefaultFolder(6)
+        if mailbox_name:
+            mailbox = outlook.Folders[mailbox_name]
+            inbox = mailbox.Folders["Inbox"]
+        else:
+            inbox = outlook.GetDefaultFolder(6)
 
         messages = inbox.Items
 
@@ -172,4 +178,23 @@ def make_naive(dt):
     if dt.tzinfo is not None:
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+def get_mailboxes():
+
+    pythoncom.CoInitialize()
+
+    try:
+        outlook = win32com.client.gencache.EnsureDispatch(
+            "Outlook.Application"
+        ).GetNamespace("MAPI")
+
+        mailboxes = []
+
+        for store in outlook.Folders:
+            mailboxes.append(store.Name)
+
+        return mailboxes
+
+    finally:
+        pythoncom.CoUninitialize()
 
