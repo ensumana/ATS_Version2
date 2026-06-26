@@ -1,200 +1,195 @@
 import os
-import re
-import win32com.client
 import pythoncom
+import win32com.client
+from datetime import timezone
+import json
+from datetime import datetime
 
 
-
-RF_KEYWORDS = [
-    "rf testing",
-    "rf design",
-    "rf architect",
-    "engineer",
-    "resume"
-]
-
-MANDATORY_WORD = "application"
-
-
-def clean(text):
-    if not text:
-        return ""
-    return re.sub(r"\s+", " ", str(text).lower())
-
-
-def get_sender_name(mail):
+def normalize_datetime(dt):
+    if not dt:
+        return None
     try:
-        if mail.SenderEmailType == "EX":
-            user = mail.Sender.GetExchangeUser()
-            if user:
-                return user.Name
+        if hasattr(dt, "tzinfo") and dt.tzinfo:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
     except:
         pass
-
-    return mail.SenderEmailAddress.split("@")[0]
-
-
-def is_matching(subject, body):
-    text = clean(subject + " " + body)
-
-    if MANDATORY_WORD not in text:
-        return False
-
-    return any(k in text for k in RF_KEYWORDS)
+    return dt
 
 
-def clean_filename(name):
-    """
-    Remove invalid Windows filename characters
-    """
-    return re.sub(r'[<>:"/\\|?*]', '_', str(name))
+def get_outlook_namespace():
+    pythoncom.CoInitialize()
+    outlook = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
+    return outlook
+
+
+def get_mailboxes():
+    pythoncom.CoInitialize()
+    try:
+        outlook = get_outlook_namespace()
+        return [outlook.Folders.Item(i).Name for i in range(1, outlook.Folders.Count + 1)]
+    finally:
+        pythoncom.CoUninitialize()
 
 
 def download_resumes(
         folder_path,
         from_date,
         to_date,
-        progress_callback,
+        progress_callback=None,
         mailbox_name=None):
+    resume_metadata = {}
+    pythoncom.CoInitialize()
 
     processed = 0
     downloaded = 0
 
-    pythoncom.CoInitialize()
-
     try:
+        outlook = get_outlook_namespace()
 
-        outlook = win32com.client.gencache.EnsureDispatch(
-            "Outlook.Application"
-        ).GetNamespace("MAPI")
-
+        # --------------------------------------------
+        # Select mailbox
+        # --------------------------------------------
         if mailbox_name:
-            mailbox = outlook.Folders[mailbox_name]
-            inbox = mailbox.Folders["Inbox"]
+
+            selected_store = None
+
+            for i in range(1, outlook.Folders.Count + 1):
+
+                store = outlook.Folders.Item(i)
+
+                if store.Name == mailbox_name:
+                    selected_store = store
+                    break
+
+            if selected_store is None:
+                raise Exception(
+                    f"Mailbox not found: {mailbox_name}"
+                )
+
+            print(f"Selected Mailbox : {selected_store.Name}")
+
+            # Find Inbox folder inside selected mailbox
+            inbox = None
+
+            for j in range(1, selected_store.Folders.Count + 1):
+
+                folder = selected_store.Folders.Item(j)
+
+                print("Folder:", folder.Name)
+
+                if folder.Name.lower() == "inbox":
+                    inbox = folder
+                    break
+
+            if inbox is None:
+                raise Exception(
+                    f"Inbox not found in mailbox {mailbox_name}"
+                )
+
         else:
+
+            # Primary mailbox
             inbox = outlook.GetDefaultFolder(6)
 
-        messages = inbox.Items
+        print(f"Processing Inbox : {inbox.Name}")
 
+        messages = inbox.Items
         messages.Sort("[ReceivedTime]", True)
 
-        total_messages = messages.Count
+        total = messages.Count
 
-        print(f"Total emails in Inbox: {total_messages}")
+        print(f"Total emails : {total}")
 
-        for idx, message in enumerate(messages, start=1):
+        for i in range(1, total + 1):
 
             try:
 
-                if not hasattr(message, "ReceivedTime"):
+                msg = messages.Item(i)
+
+                if not hasattr(msg, "ReceivedTime"):
                     continue
 
-                received_time = message.ReceivedTime
+                dt = normalize_datetime(msg.ReceivedTime)
 
-                # Convert Outlook COM datetime
-                received_time = received_time.replace(tzinfo=None)
-
-                # Date filtering
-                if received_time < from_date:
+                if not dt:
                     continue
 
-                if received_time > to_date:
+                if from_date and dt < from_date:
+                    continue
+
+                if to_date and dt > to_date:
                     continue
 
                 processed += 1
 
-                sender_name = clean_filename(
-                    str(message.SenderName).strip()
+                print(
+                    f"Email: {msg.Subject[:60]} | {dt}"
                 )
 
-                attachments = message.Attachments
+                attachments = msg.Attachments
 
-                for i in range(1, attachments.Count + 1):
+                for a in range(1, attachments.Count + 1):
 
-                    attachment = attachments.Item(i)
+                    att = attachments.Item(a)
 
-                    filename = attachment.FileName
-
-                    ext = os.path.splitext(filename)[1].lower()
+                    ext = os.path.splitext(
+                        att.FileName
+                    )[1].lower()
 
                     if ext not in [".pdf", ".doc", ".docx"]:
                         continue
 
-                    save_name = f"{sender_name}{ext}"
-
                     save_path = os.path.join(
                         folder_path,
-                        save_name
+                        att.FileName
                     )
 
+                    # Prevent overwrite
                     counter = 1
+                    base, extension = os.path.splitext(save_path)
 
                     while os.path.exists(save_path):
 
-                        save_name = (
-                            f"{sender_name}_{counter}{ext}"
-                        )
-
-                        save_path = os.path.join(
-                            folder_path,
-                            save_name
+                        save_path = (
+                            f"{base}_{counter}{extension}"
                         )
 
                         counter += 1
 
-                    attachment.SaveAsFile(save_path)
-
+                    att.SaveAsFile(save_path)
+                    resume_metadata[os.path.basename(save_path)] = {
+                        "email_date": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        "sender": msg.SenderName,
+                        "subject": msg.Subject
+                    }
                     downloaded += 1
 
-                    print(f"Saved: {save_name}")
-
-                if progress_callback:
-
-                    progress = int(
-                        (idx / max(total_messages, 1)) * 100
+                    print(
+                        f"Downloaded: {os.path.basename(save_path)}"
                     )
 
-                    progress_callback(progress)
+                if progress_callback:
+                    progress_callback(
+                        int((i / total) * 100)
+                    )
 
-            except Exception as email_error:
+            except Exception as e:
+                print(f"Email Error: {e}")
 
-                print(
-                    f"Error processing email: "
-                    f"{email_error}"
-                )
+        meta_file = os.path.join(
+            folder_path,
+            "resume_metadata.json"
+        )
 
-                continue
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(
+                resume_metadata,
+                f,
+                indent=4
+            )
 
         return processed, downloaded
 
     finally:
-
         pythoncom.CoUninitialize()
-
-from datetime import timezone
-
-def make_naive(dt):
-    """Convert Outlook timezone-aware datetime → naive"""
-    if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
-
-def get_mailboxes():
-
-    pythoncom.CoInitialize()
-
-    try:
-        outlook = win32com.client.gencache.EnsureDispatch(
-            "Outlook.Application"
-        ).GetNamespace("MAPI")
-
-        mailboxes = []
-
-        for store in outlook.Folders:
-            mailboxes.append(store.Name)
-
-        return mailboxes
-
-    finally:
-        pythoncom.CoUninitialize()
-

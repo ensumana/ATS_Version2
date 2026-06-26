@@ -3,7 +3,7 @@ from datetime import datetime
 import os
 
 from outlook_engine import download_resumes
-from ats_parser import process_resumes
+from ats_parser2 import process_resumes
 
 # --------------------------------------------------
 # PAGE CONFIG
